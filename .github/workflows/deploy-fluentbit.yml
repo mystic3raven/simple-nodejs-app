@@ -1,0 +1,91 @@
+name: Build, Push, and Deploy Node.js App with Fluent Bit
+
+on:
+  push:
+    branches:
+      - main # Trigger the workflow on pushes to the main branch
+
+jobs:
+  build-push-deploy:
+    runs-on: ubuntu-latest
+
+    env:
+      AWS_REGION: us-west-2 # Replace with your AWS region
+      ECR_REPOSITORY: simple-nodejs-app
+      IMAGE_TAG: latest
+      TERRAGRUNT_DIR: terraform-library/terragrunt/dev
+
+    steps:
+      # Step 1: Checkout the code
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+
+      # Step 2: Configure AWS credentials
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Step 3: Log in to Amazon ECR
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com
+
+      # Step 4: Build the Docker image
+      - name: Build Docker Image
+        run: |
+          docker build -t ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} .
+
+      # Step 5: Tag and push the Docker image to ECR
+      - name: Tag and Push Docker Image
+        run: |
+          docker tag ${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }} ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+          docker push ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:${{ env.IMAGE_TAG }}
+
+      # Step 6: Set up Terraform and Terragrunt
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.5.0 # Replace with your Terraform version
+
+      - name: Install Terragrunt
+        run: |
+          curl -L "$(curl -s https://api.github.com/repos/gruntwork-io/terragrunt/releases/latest | grep -o -E "https://.+?_linux_amd64.tar.gz")" > terragrunt.tar.gz
+          tar -xzf terragrunt.tar.gz terragrunt
+          chmod +x terragrunt
+          sudo mv terragrunt /usr/local/bin/
+
+      # Step 7: Deploy the infrastructure using Terragrunt
+      - name: Deploy VPC
+        working-directory: ${{ env.TERRAGRUNT_DIR }}/vpc
+        run: |
+          terragrunt init
+          terragrunt apply -auto-approve
+
+      - name: Deploy EKS Cluster
+        working-directory: ${{ env.TERRAGRUNT_DIR }}/eks-cluster
+        run: |
+          terragrunt init
+          terragrunt apply -auto-approve
+
+      # Step 8: Deploy Fluent Bit for Log Aggregation
+      - name: Deploy Fluent Bit
+        working-directory: ${{ env.TERRAGRUNT_DIR }}/cluster-with-fluent-bit
+        run: |
+          terragrunt init
+          terragrunt apply -auto-approve
+
+      - name: Deploy Node.js App
+        working-directory: ${{ env.TERRAGRUNT_DIR }}/app-deployment
+        run: |
+          terragrunt init
+          terragrunt apply -auto-approve
+
+      # Step 9: Output LoadBalancer URL
+      - name: Get LoadBalancer URL
+        working-directory: ${{ env.TERRAGRUNT_DIR }}/app-deployment
+        run: |
+          echo "LoadBalancer URL: $(terragrunt output load_balancer_url)"
